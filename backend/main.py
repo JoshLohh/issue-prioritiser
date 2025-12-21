@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from enum import Enum
 import httpx 
+from fastapi.middleware.cors import CORSMiddleware # Added for CORS
 
 class ScoredIssue(BaseModel):
     id: int
@@ -70,6 +71,18 @@ def compute_friendliness_score(issue: dict) -> float:
     return max(score, 0.0)  # Ensure non-negative score
 
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000", # Default for create-react-app
+        "http://localhost:5173"  # Default for Vite
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
 @app.get("/health")
 async def health_check():
