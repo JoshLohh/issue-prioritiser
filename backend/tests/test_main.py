@@ -229,3 +229,35 @@ def test_list_repo_issues_pagination():
     assert len(issues) == 2
     assert issues[0]["id"] == 9
     assert issues[1]["id"] == 10
+    
+def test_cors_allowed_origin_react():
+    headers = {"Origin": "http://localhost:3000"}
+    response = client.get("/health", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+def test_cors_allowed_origin_vite():
+    headers = {"Origin": "http://localhost:5173"}
+    response = client.get("/health", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+def test_cors_disallowed_origin():
+    headers = {"Origin": "http://example.com"}
+    response = client.get("/health", headers=headers)
+    assert response.status_code == 200
+    assert "access-control-allow-origin" not in response.headers
+
+def test_cors_preflight_request():
+    headers = {
+        "Origin": "http://localhost:3000",
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "X-Custom-Header",
+    }
+    response = client.options("/health", headers=headers)
+    assert response.status_code == 200
+    assert response.text == "OK"
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert response.headers["access-control-allow-credentials"] == "true"
+    assert response.headers["access-control-allow-methods"] == "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
+    assert response.headers["access-control-allow-headers"].lower() == "x-custom-header"
