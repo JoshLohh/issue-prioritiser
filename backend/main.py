@@ -82,7 +82,7 @@ async def list_repo_issues(
     owner: str, 
     repo: str,
     sort_by: SortBy = Query(SortBy.priority, description="Field to sort by."),
-    direction: str = Query("desc", regex="^(asc|desc)$", description="Sort direction, either 'asc' or 'desc'."),
+    direction: str = Query("desc", pattern="^(asc|desc)$", description="Sort direction, either 'asc' or 'desc'."),
     limit: int = Query(20, ge=1, le=100, description="Number of issues to return."),
     offset: int = Query(0, ge=0, description="Number of issues to skip.")
     ) -> ScoredIssuesResponse:
