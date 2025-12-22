@@ -3,7 +3,12 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from enum import Enum
 import httpx 
-from fastapi.middleware.cors import CORSMiddleware # Added for CORS
+from fastapi.middleware.cors import CORSMiddleware # CORS middleware
+from cachetools import TTLCache # Caching
+import time # For time.time() in TTLCache key generation, though TTLCache handles this internally
+
+# Create a TTL cache with a max size of 1024 and a TTL of 600 seconds (10 minutes)
+github_issues_cache = TTLCache(maxsize=1024, ttl=600)
 
 class ScoredIssue(BaseModel):
     id: int
@@ -54,17 +59,17 @@ def compute_friendliness_score(issue: dict) -> float:
 
     score = 0.0  # Start with a base score
 
-    #Label-based adjustments
+    #Label-based scoring
     if "good first issue" in labels or "help wanted" in labels:
         score += 3.0
     if "bug" in labels:
         score -= 1.0
 
-    #Activity-based adjustments
+    #Activity-based scoring
     if comments > 5:
         score -= 2.0  # More comments might indicate complexity
     
-    #Slight boost for more detailed descriptions
+    #Detailed descriptions make issues more approachable and understandable
     if len(body) > 300:
         score += 1.0
 
@@ -90,6 +95,35 @@ async def health_check():
 
 GITHUB_API_BASE = "https://api.github.com"
 
+# Manually handle caching for the async function
+async def get_github_issues_cached(owner: str, repo: str):
+    """
+    Fetches issues from GitHub API with caching.
+    """
+    cache_key = (owner, repo)
+    if cache_key in github_issues_cache:
+        print(f"Fetching issues for {owner}/{repo} from cache (cache hit)")
+        return github_issues_cache[cache_key]
+
+    print(f"Fetching issues from GitHub API for {owner}/{repo} (cache miss)")
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        response = await client.get(
+            url,
+            params = {"state": "open"},
+            headers = {"Accept": "application/vnd.github+json"},
+        )
+    
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail="Error fetching issues from GitHub")
+
+    data = response.json()
+    github_issues_cache[cache_key] = data # Store the awaited result
+    return data
+
+
 @app.get("/repos/{owner}/{repo}/issues", response_model=ScoredIssuesResponse)
 async def list_repo_issues(
     owner: str, 
@@ -103,22 +137,8 @@ async def list_repo_issues(
     Fetches issues for a given GitHub repository.
     Example: /repos/facebook/react/contributors
     """
-
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        response = await client.get(
-            url,
-            params = {"state": "open"},
-            headers = {"Accept": "application/vnd.github+json"},
-            )
-
-    
-    if response.status_code == 404:
-        raise HTTPException(status_code=404, detail="Repository not found")
-    if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail="Error fetching issues from GitHub")
-
-    data = response.json()
+    # Use the cached function to get GitHub issues
+    data = await get_github_issues_cached(owner, repo)
 
     issues: list[ScoredIssue] = []
 

@@ -1,7 +1,10 @@
 from fastapi.testclient import TestClient
-from backend.main import app, calculate_priority_score, compute_friendliness_score
+from backend.main import app, calculate_priority_score, compute_friendliness_score, github_issues_cache
 import respx
 from httpx import Response
+import time # Added for caching tests
+from unittest.mock import patch
+from cachetools import TTLCache
 
 client = TestClient(app)
 
@@ -66,6 +69,7 @@ def test_compute_friendliness_score():
 
 @respx.mock
 def test_list_repo_issues():
+    github_issues_cache.clear() # Clear cache for test isolation
     respx.get("https://api.github.com/repos/owner/repo/issues?state=open").return_value = Response(
         200,
         json=[
@@ -135,6 +139,7 @@ def test_list_repo_issues():
 
 @respx.mock
 def test_list_repo_issues_not_found():
+    github_issues_cache.clear() # Clear cache for test isolation
     respx.get("https://api.github.com/repos/owner/nonexistent/issues?state=open").return_value = Response(
         404,
         json={"message": "Not Found"}
@@ -145,6 +150,7 @@ def test_list_repo_issues_not_found():
 
 @respx.mock
 def test_list_repo_issues_github_error():
+    github_issues_cache.clear() # Clear cache for test isolation
     respx.get("https://api.github.com/repos/owner/repo/issues?state=open").return_value = Response(
         500,
         json={"message": "Server Error"}
@@ -155,6 +161,7 @@ def test_list_repo_issues_github_error():
 
 @respx.mock
 def test_list_repo_issues_sorting_priority_desc():
+    github_issues_cache.clear() # Clear cache for test isolation
     mock_issues = [
         {
             "id": 1, "number": 1, "title": "A", "user": {"login": "u"}, "state": "open",
@@ -177,6 +184,7 @@ def test_list_repo_issues_sorting_priority_desc():
 
 @respx.mock
 def test_list_repo_issues_sorting_friendliness_asc():
+    github_issues_cache.clear() # Clear cache for test isolation
     mock_issues = [
         {
             "id": 1, "number": 1, "title": "A", "user": {"login": "u"}, "state": "open",
@@ -199,6 +207,7 @@ def test_list_repo_issues_sorting_friendliness_asc():
 
 @respx.mock
 def test_list_repo_issues_pagination():
+    github_issues_cache.clear() # Clear cache for test isolation
     mock_issues = []
     for i in range(1, 11):
         mock_issues.append({
@@ -261,3 +270,41 @@ def test_cors_preflight_request():
     assert response.headers["access-control-allow-credentials"] == "true"
     assert response.headers["access-control-allow-methods"] == "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
     assert response.headers["access-control-allow-headers"].lower() == "x-custom-header"
+
+@respx.mock
+@patch('backend.main.github_issues_cache', TTLCache(maxsize=1024, ttl=1))
+def test_caching_list_repo_issues():
+    owner = "owner_cached"
+    repo = "repo_cached"
+    
+    mock_github_response_data = [
+        {"id": 1, "number": 1, "title": "Cached Issue", "user": {"login": "user"}, "state": "open",
+         "created_at": "2023-01-01T00:00:00Z", "updated_at": "2023-01-01T00:00:00Z",
+         "labels": [], "html_url": "url", "comments": 0, "body": ""}
+    ]
+    
+    # Mock the external httpx call
+    respx.get(f"https://api.github.com/repos/{owner}/{repo}/issues?state=open").return_value = Response(
+        200, json=mock_github_response_data
+    )
+    
+    # 1. First call: should hit the GitHub API (via respx)
+    response1 = client.get(f"/repos/{owner}/{repo}/issues")
+    assert response1.status_code == 200
+    assert respx.calls.call_count == 1
+    assert "Cached Issue" in response1.json()["issues"][0]["title"]
+    
+    # 2. Second call immediately: should be served from cache
+    response2 = client.get(f"/repos/{owner}/{repo}/issues")
+    assert response2.status_code == 200
+    assert respx.calls.call_count == 1  # Still 1 call, indicating cache hit
+    assert "Cached Issue" in response2.json()["issues"][0]["title"]
+
+    # Wait for the short TTL to expire
+    time.sleep(1.1) 
+
+    # 3. Third call after expiration: should hit GitHub API again
+    response3 = client.get(f"/repos/{owner}/{repo}/issues")
+    assert response3.status_code == 200
+    assert respx.calls.call_count == 2 # New call after expiration
+    assert "Cached Issue" in response3.json()["issues"][0]["title"]
