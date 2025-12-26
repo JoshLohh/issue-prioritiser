@@ -1,14 +1,24 @@
 from typing import List
-from fastapi import FastAPI, HTTPException, Query 
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 from enum import Enum
 import httpx 
-from fastapi.middleware.cors import CORSMiddleware # CORS middleware
-from cachetools import TTLCache # Caching
-import time # For time.time() in TTLCache key generation, though TTLCache handles this internally
+import os
+from fastapi.middleware.cors import CORSMiddleware
+import re
 
-# Create a TTL cache with a max size of 1024 and a TTL of 600 seconds (10 minutes)
-github_issues_cache = TTLCache(maxsize=1024, ttl=600)
+# Helper to parse GitHub's Link header for pagination
+def parse_link_header(headers):
+    links = {}
+    if "link" in headers:
+        link_header = headers["link"]
+        link_parts = link_header.split(', ')
+        for part in link_parts:
+            match = re.match(r'<(.*)>; rel="(.*)"', part)
+            if match:
+                url, rel = match.groups()
+                links[rel] = url
+    return links
 
 class ScoredIssue(BaseModel):
     id: int
@@ -26,6 +36,7 @@ class ScoredIssue(BaseModel):
 class ScoredIssuesResponse(BaseModel):
     owner: str
     repo: str
+    total_issues: int
     issues: List[ScoredIssue]
 
 class SortBy(str, Enum):
@@ -36,57 +47,45 @@ class SortBy(str, Enum):
 def calculate_priority_score(issue: dict) -> float:
     labels = {label["name"].lower() for label in issue.get("labels", [])}
     comments = issue.get("comments", 0)
-
     score = 0.0
-
-    #Label-based scoring
     if "bug" in labels:
         score += 3.0
     if "critical" in labels or "high priority" in labels:
         score += 4.0
     if "enhancement" in labels or "feature" in labels:
         score += 1.0
-    
-    #Activity-based scoring
-    score += min(comments, 10) * 0.3  # more comments -> more important
-
+    score += min(comments, 10) * 0.3
     return score
 
 def compute_friendliness_score(issue: dict) -> float:
     labels = {label["name"].lower() for label in issue.get("labels", [])}
     body = issue.get("body", "") or ""
     comments = issue.get("comments", 0)
-
-    score = 0.0  # Start with a base score
-
-    #Label-based scoring
+    score = 0.0
     if "good first issue" in labels or "help wanted" in labels:
         score += 3.0
     if "bug" in labels:
         score -= 1.0
-
-    #Activity-based scoring
     if comments > 5:
-        score -= 2.0  # More comments might indicate complexity
-    
-    #Detailed descriptions make issues more approachable and understandable
+        score -= 2.0
     if len(body) > 300:
         score += 1.0
-
-    return max(score, 0.0)  # Ensure non-negative score
+    return max(score, 0.0)
 
 app = FastAPI()
 
-# Add CORS middleware
+@app.middleware("http")
+async def add_cache_control_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "public, max-age=180"
+    return response
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000", # Default for create-react-app
-        "http://localhost:5173"  # Default for Vite
-    ],
+    allow_origins=["http://localhost:3000", "http://localhost:5173"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 @app.get("/health")
@@ -94,34 +93,50 @@ async def health_check():
     return {"status": "ok"}
 
 GITHUB_API_BASE = "https://api.github.com"
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
-# Manually handle caching for the async function
-async def get_github_issues_cached(owner: str, repo: str):
+async def get_all_github_issues(owner: str, repo: str):
     """
-    Fetches issues from GitHub API with caching.
+    Fetches ALL issues from the GitHub repository by handling pagination.
     """
-    cache_key = (owner, repo)
-    if cache_key in github_issues_cache:
-        print(f"Fetching issues for {owner}/{repo} from cache (cache hit)")
-        return github_issues_cache[cache_key]
-
-    print(f"Fetching issues from GitHub API for {owner}/{repo} (cache miss)")
+    all_issues = []
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        response = await client.get(
-            url,
-            params = {"state": "open"},
-            headers = {"Accept": "application/vnd.github+json"},
-        )
+    is_first_request = True
     
-    if response.status_code == 404:
-        raise HTTPException(status_code=404, detail="Repository not found")
-    if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail="Error fetching issues from GitHub")
+    headers = {"Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
-    data = response.json()
-    github_issues_cache[cache_key] = data # Store the awaited result
-    return data
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        while url:
+            if is_first_request:
+                params = {"state": "open", "per_page": 100}
+                is_first_request = False
+            else:
+                params = None
+
+            response = await client.get(url, params=params, headers=headers)
+            
+            if response.status_code == 403:
+                # Distinguish between auth failure and rate limit
+                if GITHUB_TOKEN:
+                    detail = "GitHub API request failed: 403 Forbidden. This could be due to an invalid token or insufficient permissions."
+                else:
+                    detail = "GitHub API rate limit exceeded. Please set a GITHUB_TOKEN environment variable to increase your rate limit."
+                raise HTTPException(status_code=403, detail=detail)
+
+            if response.status_code == 404 and not all_issues:
+                raise HTTPException(status_code=404, detail="Repository not found.")
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail="Error fetching issues from GitHub.")
+
+            all_issues.extend(response.json())
+            
+            links = parse_link_header(response.headers)
+            url = links.get("next")
+
+    return all_issues
 
 
 @app.get("/repos/{owner}/{repo}/issues", response_model=ScoredIssuesResponse)
@@ -130,19 +145,14 @@ async def list_repo_issues(
     repo: str,
     sort_by: SortBy = Query(SortBy.priority, description="Field to sort by."),
     direction: str = Query("desc", pattern="^(asc|desc)$", description="Sort direction, either 'asc' or 'desc'."),
-    limit: int = Query(20, ge=1, le=100, description="Number of issues to return."),
+    limit: int = Query(25, ge=1, le=100, description="Number of issues to return."),
     offset: int = Query(0, ge=0, description="Number of issues to skip.")
     ) -> ScoredIssuesResponse:
-    """
-    Fetches issues for a given GitHub repository.
-    Example: /repos/facebook/react/contributors
-    """
-    # Use the cached function to get GitHub issues
-    data = await get_github_issues_cached(owner, repo)
+    
+    all_raw_issues = await get_all_github_issues(owner, repo)
 
-    issues: list[ScoredIssue] = []
-
-    for issue in data:
+    scored_issues: list[ScoredIssue] = []
+    for issue in all_raw_issues:
         if "pull_request" in issue:
             continue
 
@@ -163,9 +173,8 @@ async def list_repo_issues(
             priority_score=priority_score,
             friendliness_score=friendliness_score,
         )
-        issues.append(scored_issue)
+        scored_issues.append(scored_issue)
 
-    # Apply sorting
     if sort_by == SortBy.priority:
         key_fn = lambda issue: issue.priority_score
     elif sort_by == SortBy.friendliness:
@@ -173,9 +182,10 @@ async def list_repo_issues(
     else:
         key_fn = lambda issue: issue.created_at
 
-    #Apply pagination
-    issues = issues[offset:offset + limit]
     reverse = (direction == "desc")
-    issues = sorted(issues, key=key_fn, reverse=reverse)
-    return ScoredIssuesResponse(owner=owner, repo=repo, issues=issues)
-        
+    sorted_issues = sorted(scored_issues, key=key_fn, reverse=reverse)
+    
+    total_issues = len(sorted_issues)
+    paginated_issues = sorted_issues[offset:offset + limit]
+
+    return ScoredIssuesResponse(owner=owner, repo=repo, total_issues=total_issues, issues=paginated_issues)
