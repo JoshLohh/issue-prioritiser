@@ -93,12 +93,12 @@ async def health_check():
     return {"status": "ok"}
 
 GITHUB_API_BASE = "https://api.github.com"
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
 async def get_all_github_issues(owner: str, repo: str):
     """
     Fetches ALL issues from the GitHub repository by handling pagination.
     """
+    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
     all_issues = []
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
     is_first_request = True

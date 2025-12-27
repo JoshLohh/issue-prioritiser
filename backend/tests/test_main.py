@@ -9,6 +9,7 @@ def test_health_check():
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+    assert response.headers["Cache-Control"] == "public, max-age=180"
 
 def test_calculate_priority_score():
     # Test with bug and high priority labels
@@ -67,6 +68,7 @@ def test_list_repo_issues_multi_page():
     assert respx.calls.call_count == 2
     assert len(data["issues"]) == 2
     assert data["total_issues"] == 2
+    assert response.headers["Cache-Control"] == "public, max-age=180"
     
     titles = {issue["title"] for issue in data["issues"]}
     assert "Issue from Page 1" in titles
@@ -92,6 +94,7 @@ def test_list_repo_issues_pagination_and_sorting():
     # Request page 1, sorted by priority desc, with a limit of 2
     response = client.get(f"/repos/{owner}/{repo}/issues?sort_by=priority&direction=desc&limit=2&offset=0")
     assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "public, max-age=180"
     data = response.json()
     
     # Should get the first 2 of the fully sorted list
@@ -109,3 +112,40 @@ def test_list_repo_issues_pagination_and_sorting():
     assert data["total_issues"] == 3
     assert len(data["issues"]) == 1
     assert data["issues"][0]["title"] == "Low Prio"
+
+@respx.mock
+def test_github_token_is_used(monkeypatch):
+    """
+    Tests that the GITHUB_TOKEN environment variable is used for authorization.
+    """
+    monkeypatch.setenv("GITHUB_TOKEN", "test_token_123")
+    
+    owner = "test-owner"
+    repo = "test-repo-token"
+    
+    # Mock the GitHub API endpoint and get the route object
+    gh_mock = respx.get(f"https://api.github.com/repos/{owner}/{repo}/issues?state=open&per_page=100")
+    gh_mock.return_value = Response(200, json=[])
+    
+    client.get(f"/repos/{owner}/{repo}/issues")
+    
+    assert gh_mock.call_count == 1
+    request = gh_mock.calls.last.request
+    assert "Authorization" in request.headers
+    assert request.headers["Authorization"] == "Bearer test_token_123"
+
+@respx.mock
+def test_403_error_handling():
+    """
+    Tests that a 403 error from GitHub is handled correctly.
+    """
+    owner = "test-owner"
+    repo = "test-repo-403"
+    
+    # Mock the GitHub API to return a 403 error
+    respx.get(f"https://api.github.com/repos/{owner}/{repo}/issues?state=open&per_page=100").return_value = Response(403)
+    
+    response = client.get(f"/repos/{owner}/{repo}/issues")
+    
+    assert response.status_code == 403
+    assert "rate limit exceeded" in response.json()["detail"]
