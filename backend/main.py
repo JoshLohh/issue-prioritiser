@@ -80,9 +80,20 @@ async def add_cache_control_header(request: Request, call_next):
     response.headers["Cache-Control"] = "public, max-age=180"
     return response
 
+# Origins for CORS
+origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+]
+
+# If a frontend URL is set in the environment, add it to the origins list
+FRONTEND_URL = os.environ.get("FRONTEND_URL")
+if FRONTEND_URL:
+    origins.append(FRONTEND_URL)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
