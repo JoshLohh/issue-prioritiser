@@ -22,6 +22,9 @@ type DirectionType = 'asc' | 'desc';
 
 const PAGE_SIZE = 20;
 
+// Use environment variable for API base URL, with a fallback for local development
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
 const range = (start: number, end: number) => {
   const length = end - start + 1;
   return Array.from({ length }, (_, idx) => idx + start);
@@ -58,7 +61,7 @@ function App() {
         params['_'] = new Date().getTime();
       }
 
-      const response = await axios.get(`http://localhost:8000/repos/${owner}/${repo}/issues`, { params });
+      const response = await axios.get(`${API_BASE_URL}/repos/${owner}/${repo}/issues`, { params });
 
       setIssues(response.data.issues);
       setTotalIssues(response.data.total_issues);
