@@ -5,3 +5,5 @@ httpx
 pytest
 respx
 cachetools
+SQLAlchemy
+psycopg2-binary
