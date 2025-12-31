@@ -8,9 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 import re
 from sqlalchemy.orm import Session
 import datetime
+from datetime import timedelta
 
 from . import models, database # Import models and database
 from .database import engine # Import engine to create tables
+
+# Time limit before refreshing data
+REFRESH_THRESHOLD = timedelta(hours=1)
 
 # Helper to parse GitHub's Link header for pagination
 def parse_link_header(headers):
@@ -168,38 +172,55 @@ async def list_repo_issues(
     direction: str = Query("desc", pattern="^(asc|desc)$", description="Sort direction, either 'asc' or 'desc'."),
     limit: int = Query(25, ge=1, le=100, description="Number of issues to return."),
     offset: int = Query(0, ge=0, description="Number of issues to skip."),
+    force_refresh: bool = Query(False, description="Force a refresh from the GitHub API, ignoring the cache."),
     db: Session = Depends(database.get_db) 
     ) -> ScoredIssuesResponse:
-    
-    # Raw issues
-    all_raw_issues = await get_all_github_issues(owner, repo)
 
-    # Put necessary issues into db
-    for issue_data in all_raw_issues: 
-        if "pull_request" in issue_data:
-            continue
+    # Caching Logic
+    should_fetch_from_api = True
+    if not force_refresh:
+        repo_record = db.query(models.Repo).filter_by(owner=owner, name=repo).first()
+        if repo_record:
+            time_since_refresh = datetime.datetime.now() - repo_record.last_refreshed
+            if time_since_refresh < REFRESH_THRESHOLD:
+                should_fetch_from_api = False
 
+    if should_fetch_from_api:
+        # Raw issues
+        all_raw_issues = await get_all_github_issues(owner, repo)
+
+        # Put necessary issues into db
+        for issue_data in all_raw_issues: 
+            if "pull_request" in issue_data:
+                continue
+            
+            db_issue = db.query(models.Issue).filter(models.Issue.id == issue_data["id"]).first()
+
+            if not db_issue:
+                # If it's a new issue, create a new record
+                db_issue = models.Issue(id=issue_data["id"])
+                db.add(db_issue)
+            
+            # Update record
+            db_issue.number = issue_data["number"]
+            db_issue.title = issue_data["title"]
+            db_issue.user = issue_data["user"]["login"]
+            db_issue.state = issue_data["state"]
+            db_issue.created_at = datetime.datetime.fromisoformat(issue_data["created_at"].replace('Z', '+00:00'))
+            db_issue.updated_at = datetime.datetime.fromisoformat(issue_data["updated_at"].replace('Z', '+00:00'))
+            db_issue.labels = [label["name"].lower() for label in issue_data.get("labels", [])]
+            db_issue.html_url = issue_data["html_url"]
+            db_issue.priority_score = calculate_priority_score(issue_data)
+            db_issue.friendliness_score = compute_friendliness_score(issue_data)
+
+        # Update the repo's last_refreshed timestamp
+        repo_record = db.query(models.Repo).filter_by(owner=owner, name=repo).first()
+        if not repo_record:
+            repo_record = models.Repo(owner=owner, name=repo)
+            db.add(repo_record)
+        repo_record.last_refreshed = datetime.datetime.now()
         
-        db_issue = db.query(models.Issue).filter(models.Issue.id == issue_data["id"]).first()
-
-        if not db_issue:
-            # If it's a new issue, create a new record
-            db_issue = models.Issue(id=issue_data["id"])
-            db.add(db_issue)
-        
-        # Update record
-        db_issue.number = issue_data["number"]
-        db_issue.title = issue_data["title"]
-        db_issue.user = issue_data["user"]["login"]
-        db_issue.state = issue_data["state"]
-        db_issue.created_at = datetime.datetime.fromisoformat(issue_data["created_at"].replace('Z', '+00:00'))
-        db_issue.updated_at = datetime.datetime.fromisoformat(issue_data["updated_at"].replace('Z', '+00:00'))
-        db_issue.labels = [label["name"].lower() for label in issue_data.get("labels", [])]
-        db_issue.html_url = issue_data["html_url"]
-        db_issue.priority_score = calculate_priority_score(issue_data)
-        db_issue.friendliness_score = compute_friendliness_score(issue_data)
-
-    db.commit()
+        db.commit()
 
     # Query db 
     sort_column_map = {
