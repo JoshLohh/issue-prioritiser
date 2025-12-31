@@ -1,0 +1,16 @@
+version: '3.8'
+services:
+  postgres_db:
+    image: postgres:15 
+    container_name: issue_prioritiser_postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: issue_prioritiser_db
+    ports:
+      - "5432:5432" # Maps the container's port 5432 to my port 5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # Persists database data on my machine
+
+volumes:
+  postgres_data:

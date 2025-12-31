@@ -171,81 +171,70 @@ async def list_repo_issues(
     db: Session = Depends(database.get_db) 
     ) -> ScoredIssuesResponse:
     
+    # Raw issues
     all_raw_issues = await get_all_github_issues(owner, repo)
 
-    scored_issues: list[ScoredIssue] = []
+    # Put necessary issues into db
     for issue_data in all_raw_issues: 
         if "pull_request" in issue_data:
             continue
 
-        labels = [label["name"].lower() for label in issue_data.get("labels", [])]
-        priority_score = calculate_priority_score(issue_data)
-        friendliness_score = compute_friendliness_score(issue_data)
+        
+        db_issue = db.query(models.Issue).filter(models.Issue.id == issue_data["id"]).first()
 
-        # Create ScoredIssue Pydantic model
-        scored_issue = ScoredIssue(
-            id=issue_data["id"],
-            number=issue_data["number"],
-            title=issue_data["title"],
-            user=issue_data["user"]["login"],
-            state=issue_data["state"],
-            created_at=issue_data["created_at"],
-            updated_at=issue_data["updated_at"],
-            labels=labels,
-            html_url=issue_data["html_url"],
-            priority_score=priority_score,
-            friendliness_score=friendliness_score,
-        )
-        scored_issues.append(scored_issue)
-
-        # Save or update issue in the database
-        db_issue = db.query(models.Issue).filter(models.Issue.id == scored_issue.id).first()
-        if db_issue:
-            # Update existing issue
-            db_issue.number = scored_issue.number
-            db_issue.title = scored_issue.title
-            db_issue.user = scored_issue.user
-            db_issue.state = scored_issue.state
-            db_issue.created_at = scored_issue.created_at
-            db_issue.updated_at = scored_issue.updated_at
-            db_issue.labels = scored_issue.labels
-            db_issue.html_url = scored_issue.html_url
-            db_issue.priority_score = scored_issue.priority_score
-            db_issue.friendliness_score = scored_issue.friendliness_score
-        else:
-            # Create new issue
-            db_issue = models.Issue(
-                id=scored_issue.id,
-                number=scored_issue.number,
-                title=scored_issue.title,
-                user=scored_issue.user,
-                state=scored_issue.state,
-                created_at=scored_issue.created_at,
-                updated_at=scored_issue.updated_at,
-                labels=scored_issue.labels,
-                html_url=scored_issue.html_url,
-                priority_score=scored_issue.priority_score,
-                friendliness_score=scored_issue.friendliness_score,
-            )
+        if not db_issue:
+            # If it's a new issue, create a new record
+            db_issue = models.Issue(id=issue_data["id"])
             db.add(db_issue)
-    
-    db.commit() 
-    # Refresh the instances to ensure they reflect any changes from the database
-    for issue_obj in scored_issues:
-        db.refresh(db.query(models.Issue).filter(models.Issue.id == issue_obj.id).first())
+        
+        # Update record
+        db_issue.number = issue_data["number"]
+        db_issue.title = issue_data["title"]
+        db_issue.user = issue_data["user"]["login"]
+        db_issue.state = issue_data["state"]
+        db_issue.created_at = datetime.datetime.fromisoformat(issue_data["created_at"].replace('Z', '+00:00'))
+        db_issue.updated_at = datetime.datetime.fromisoformat(issue_data["updated_at"].replace('Z', '+00:00'))
+        db_issue.labels = [label["name"].lower() for label in issue_data.get("labels", [])]
+        db_issue.html_url = issue_data["html_url"]
+        db_issue.priority_score = calculate_priority_score(issue_data)
+        db_issue.friendliness_score = compute_friendliness_score(issue_data)
 
+    db.commit()
 
-    if sort_by == SortBy.priority:
-        key_fn = lambda issue: issue.priority_score
-    elif sort_by == SortBy.friendliness:
-        key_fn = lambda issue: issue.friendliness_score
+    # Query db 
+    sort_column_map = {
+        "priority": models.Issue.priority_score,
+        "friendliness": models.Issue.friendliness_score,
+        "created_at": models.Issue.created_at,
+    }
+    sort_column = sort_column_map.get(sort_by, models.Issue.priority_score)
+
+    # Apply descending or ascending order
+    if direction == "desc":
+        sort_expression = sort_column.desc()
     else:
-        key_fn = lambda issue: issue.created_at
+        sort_expression = sort_column.asc()
 
-    reverse = (direction == "desc")
-    sorted_issues = sorted(scored_issues, key=key_fn, reverse=reverse)
+    # Execute query
+    query = db.query(models.Issue).order_by(sort_expression)
+    total_issues = query.count()
+    paginated_db_issues = query.offset(offset).limit(limit).all()
+
+    # Convert the database models to Pydantic models for response
+    scored_issues = [
+        ScoredIssue(
+            id=db_issue.id,
+            number=db_issue.number,
+            title=db_issue.title,
+            user=db_issue.user,
+            state=db_issue.state,
+            created_at=db_issue.created_at.isoformat(),
+            updated_at=db_issue.updated_at.isoformat(),
+            labels=db_issue.labels,
+            html_url=db_issue.html_url,
+            priority_score=db_issue.priority_score,
+            friendliness_score=db_issue.friendliness_score,
+        ) for db_issue in paginated_db_issues
+    ]
     
-    total_issues = len(sorted_issues)
-    paginated_issues = sorted_issues[offset:offset + limit]
-
-    return ScoredIssuesResponse(owner=owner, repo=repo, total_issues=total_issues, issues=paginated_issues)
+    return ScoredIssuesResponse(owner=owner, repo=repo, total_issues=total_issues, issues=scored_issues)
