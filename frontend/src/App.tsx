@@ -58,7 +58,7 @@ function App() {
       };
 
       if (forceRefresh) {
-        params['_'] = new Date().getTime();
+        (params as any)['force_refresh'] = true;
       }
 
       const response = await axios.get(`${API_BASE_URL}/repos/${owner}/${repo}/issues`, { params });
