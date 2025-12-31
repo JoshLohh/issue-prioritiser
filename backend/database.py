@@ -10,7 +10,7 @@ if not DATABASE_URL:
     # Fallback for local development, assuming a local PostgreSQL named 'issue_prioritiser_db'
     # Local testing: 'postgresql://user:password@localhost/issue_prioritiser_db', must have local db server and db created
     print("DATABASE_URL environment variable not set. Using fallback for local development.")
-    DATABASE_URL = "postgresql://user:password@localhost/issue_prioritiser_db" # Replace with your local DB credentials if different
+    DATABASE_URL = "postgresql://user:password@localhost/issue_prioritiser_db" # Replace with local DB credentials if different
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
