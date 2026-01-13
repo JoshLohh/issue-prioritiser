@@ -9,9 +9,13 @@ import re
 from sqlalchemy.orm import Session
 import datetime
 from datetime import timedelta
+from dotenv import load_dotenv # Import load_dotenv
+
+load_dotenv() # Load environment variables from .env
 
 from . import models, database # Import models and database
 from .database import engine # Import engine to create tables
+from .scorer import get_scorer
 
 # Time limit before refreshing data
 REFRESH_THRESHOLD = timedelta(hours=1)
@@ -52,34 +56,6 @@ class SortBy(str, Enum):
     priority = "priority"
     friendliness = "friendliness"
     created_at = "created_at"
-
-def calculate_priority_score(issue: dict) -> float:
-    labels = {label["name"].lower() for label in issue.get("labels", [])}
-    comments = issue.get("comments", 0)
-    score = 0.0
-    if "bug" in labels:
-        score += 3.0
-    if "critical" in labels or "high priority" in labels:
-        score += 4.0
-    if "enhancement" in labels or "feature" in labels:
-        score += 1.0
-    score += min(comments, 10) * 0.3
-    return score
-
-def compute_friendliness_score(issue: dict) -> float:
-    labels = {label["name"].lower() for label in issue.get("labels", [])}
-    body = issue.get("body", "") or ""
-    comments = issue.get("comments", 0)
-    score = 0.0
-    if "good first issue" in labels or "help wanted" in labels:
-        score += 3.0
-    if "bug" in labels:
-        score -= 1.0
-    if comments > 5:
-        score -= 2.0
-    if len(body) > 300:
-        score += 1.0
-    return max(score, 0.0)
 
 app = FastAPI()
 
@@ -186,8 +162,16 @@ async def list_repo_issues(
                 should_fetch_from_api = False
 
     if should_fetch_from_api:
+        # Get or create the repo record
+        repo_record = db.query(models.Repo).filter_by(owner=owner, name=repo).first()
+        if not repo_record:
+            repo_record = models.Repo(owner=owner, name=repo)
+            db.add(repo_record)
+
         # Raw issues
         all_raw_issues = await get_all_github_issues(owner, repo)
+        
+        scorer = get_scorer()
 
         # Put necessary issues into db
         for issue_data in all_raw_issues: 
@@ -196,12 +180,25 @@ async def list_repo_issues(
             
             db_issue = db.query(models.Issue).filter(models.Issue.id == issue_data["id"]).first()
 
+            # Determine if the issue needs to be scored 
+            needs_scoring = False
             if not db_issue:
-                # If it's a new issue, create a new record
+                # New issue, create a new record and mark for scoring
                 db_issue = models.Issue(id=issue_data["id"])
                 db.add(db_issue)
+                needs_scoring = True
+            elif force_refresh:
+                # Score during force refresh
+                needs_scoring = True
             
-            # Update record
+            # Score the issue if needed
+            if needs_scoring:
+                scores = scorer.score_issue(issue_data)
+                db_issue.priority_score = scores["priority_score"]
+                db_issue.friendliness_score = scores["friendliness_score"]
+
+            # Update other record fields regardless of whether scoring happened
+            db_issue.repo = repo_record # Associate issue with the repo
             db_issue.number = issue_data["number"]
             db_issue.title = issue_data["title"]
             db_issue.user = issue_data["user"]["login"]
@@ -210,19 +207,18 @@ async def list_repo_issues(
             db_issue.updated_at = datetime.datetime.fromisoformat(issue_data["updated_at"].replace('Z', '+00:00'))
             db_issue.labels = [label["name"].lower() for label in issue_data.get("labels", [])]
             db_issue.html_url = issue_data["html_url"]
-            db_issue.priority_score = calculate_priority_score(issue_data)
-            db_issue.friendliness_score = compute_friendliness_score(issue_data)
 
         # Update the repo's last_refreshed timestamp
-        repo_record = db.query(models.Repo).filter_by(owner=owner, name=repo).first()
-        if not repo_record:
-            repo_record = models.Repo(owner=owner, name=repo)
-            db.add(repo_record)
         repo_record.last_refreshed = datetime.datetime.now()
         
         db.commit()
 
     # Query db 
+    # Get the repo_id for the current repository
+    repo_record = db.query(models.Repo).filter_by(owner=owner, name=repo).first()
+    if not repo_record:
+        return ScoredIssuesResponse(owner=owner, repo=repo, total_issues=0, issues=[])
+
     sort_column_map = {
         "priority": models.Issue.priority_score,
         "friendliness": models.Issue.friendliness_score,
@@ -236,8 +232,8 @@ async def list_repo_issues(
     else:
         sort_expression = sort_column.asc()
 
-    # Execute query
-    query = db.query(models.Issue).order_by(sort_expression)
+    # Execute query, filtering by repo_id
+    query = db.query(models.Issue).filter(models.Issue.repo_id == repo_record.id).order_by(sort_expression)
     total_issues = query.count()
     paginated_db_issues = query.offset(offset).limit(limit).all()
 
