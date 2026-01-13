@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ARRAY, BigInteger, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ARRAY, BigInteger, UniqueConstraint, ForeignKey
+from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 import datetime
@@ -13,13 +14,16 @@ class Repo(Base):
     name = Column(String, nullable=False)
     last_refreshed = Column(DateTime, nullable=False, default=datetime.datetime.now)
 
+    issues = relationship("Issue", back_populates="repo")
+
     __table_args__ = (UniqueConstraint('owner', 'name', name='_owner_name_uc'),)
 
 class Issue(Base):
     __tablename__ = "issues"
 
     id = Column(BigInteger, primary_key=True, index=True)
-    number = Column(Integer, unique=True, index=True, nullable=False)
+    repo_id = Column(Integer, ForeignKey("repos.id"), nullable=False, index=True)
+    number = Column(Integer, index=True, nullable=False)
     title = Column(String, index=True, nullable=False)
     user = Column(String, nullable=False)
     state = Column(String, nullable=False)
@@ -29,5 +33,7 @@ class Issue(Base):
     html_url = Column(String, nullable=False)
     priority_score = Column(Float, nullable=False)
     friendliness_score = Column(Float, nullable=False)
+
+    repo = relationship("Repo", back_populates="issues")
 
 __all__ = ["Repo", "Issue"]
